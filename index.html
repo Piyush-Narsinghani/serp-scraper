@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Google First-Page Scraper</title>
+<title>Google SERP + AI Overview</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <style>
   :root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--muted:#5b6170;--line:#e3e6ec;--accent:#1f6feb;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
@@ -32,13 +32,23 @@
 <body>
 <main>
   <h1>Google First-Page Scraper</h1>
-  <p class="sub">Upload a CSV, get Google's first page for every row via the Serper API, download the results as a new CSV. Runs entirely in your browser.</p>
+  <p class="sub">Upload a CSV, get Google's first page (including the AI Overview) for every row, download the results as a new CSV. Runs entirely in your browser.</p>
 
   <div class="card">
-    <h2>1. Serper API key</h2>
-    <input id="key" type="password" placeholder="Paste your Serper API key" autocomplete="off">
-    <div class="check"><input id="remember" type="checkbox"><span>Remember on this device (stored only in this browser)</span></div>
-    <p class="muted">The key is sent only to google.serper.dev. One search = 1 Serper credit.</p>
+    <h2>1. Search provider and API key</h2>
+    <div class="row">
+      <div><label for="prov">Provider</label>
+        <select id="prov">
+          <option value="serpapi">SerpApi — first page + Google AI Overview</option>
+          <option value="serper">Serper — first page only (no AI Overview, cheaper)</option>
+        </select></div>
+      <div><label for="key">API key for the selected provider</label>
+        <input id="key" type="password" placeholder="Paste your API key" autocomplete="off"></div>
+    </div>
+    <div class="check"><input id="remember" type="checkbox"><span>Remember key on this device (stored only in this browser)</span></div>
+    <label for="relay">Relay URL (optional — only if SerpApi requests fail with "Failed to fetch"; see README)</label>
+    <input id="relay" type="text" placeholder="https://your-worker.your-name.workers.dev">
+    <p class="muted" id="provnote"></p>
   </div>
 
   <div class="card">
@@ -79,7 +89,7 @@
 
   <div class="card">
     <h2>What the output CSV contains</h2>
-    <p class="muted">All your original columns, unchanged and in order, plus: <code>serp_query</code>, <code>serp_status</code>, <code>serp_error</code>, <code>serp_fetched_at</code>, <code>result_count</code>, <code>r1_title … r10_title</code>, <code>r1_link … r10_link</code>, <code>r1_snippet … r10_snippet</code>, <code>answer_box</code>, <code>knowledge_graph</code>, <code>people_also_ask</code>, <code>related_searches</code>, <code>top_stories</code>, <code>raw_json</code> (the full Serper response for that row). Google's AI Overview is not included — Serper does not return it.</p>
+    <p class="muted">All your original columns, unchanged and in order, plus: <code>serp_provider</code>, <code>serp_query</code>, <code>serp_status</code>, <code>serp_error</code>, <code>serp_fetched_at</code>, <code>result_count</code>, <code>r1_title … r10_title</code>, <code>r1_link … r10_link</code>, <code>r1_snippet … r10_snippet</code>, <code>answer_box</code>, <code>knowledge_graph</code>, <code>people_also_ask</code>, <code>related_searches</code>, <code>top_stories</code>, <code>raw_json</code> (the full API response for that row), and — with SerpApi — <code>ai_overview_status</code> (inline / lazy-loaded / none / error), <code>ai_overview_text</code> (the full AI Overview, word for word) and <code>ai_overview_sources</code> (the links it cites). With Serper the AI Overview columns stay empty.</p>
   </div>
 </main>
 
@@ -91,6 +101,43 @@ const $ = id => document.getElementById(id);
 const S = { rows: [], fields: [], fileKey: "", results: {}, running: false, queue: [], inflight: 0, t0: 0, doneAtStart: 0 };
 
 /* ---------- pure helpers (also unit-tested) ---------- */
+function aioText(blocks, depth) {
+  // Flatten SerpApi ai_overview.text_blocks (paragraphs, headings, lists, nested lists, tables) to readable text
+  depth = depth || 0; const out = [];
+  (blocks || []).forEach(b => {
+    const pad = "  ".repeat(depth);
+    if (b.type === "list" || Array.isArray(b.list)) {
+      if (b.snippet) out.push(pad + b.snippet);
+      (b.list || []).forEach(it => {
+        const line = [it.title, it.snippet].filter(Boolean).join(" ");
+        if (line) out.push(pad + "- " + line);
+        if (it.list || it.text_blocks) out.push(aioText(it.text_blocks || [{ type: "list", list: it.list }], depth + 1));
+      });
+    } else if (b.type === "table" && Array.isArray(b.table)) {
+      b.table.forEach(row => out.push(pad + (Array.isArray(row) ? row.join(" | ") : JSON.stringify(row))));
+    } else {
+      const t = [b.title, b.snippet].filter(Boolean).join(" ");
+      if (t) out.push(pad + t);
+      if (b.text_blocks) out.push(aioText(b.text_blocks, depth + 1));
+    }
+  });
+  return out.filter(Boolean).join("\n");
+}
+function aioSources(ai) {
+  return (ai && ai.references || []).map(r => r.link).filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(" ; ");
+}
+function normalizeSerpApi(j) {
+  // Map SerpApi google-engine JSON to the Serper-like shape used by flatten()
+  return {
+    organic: (j.organic_results || []).map(o => ({ title: o.title, link: o.link, snippet: o.snippet })),
+    answerBox: j.answer_box ? { title: j.answer_box.title, answer: j.answer_box.answer, snippet: j.answer_box.snippet, link: j.answer_box.link } : null,
+    knowledgeGraph: j.knowledge_graph ? { title: j.knowledge_graph.title, type: j.knowledge_graph.type,
+      description: j.knowledge_graph.description, website: j.knowledge_graph.website } : null,
+    peopleAlsoAsk: (j.related_questions || []).map(q => ({ question: q.question, snippet: q.snippet, link: q.link })),
+    relatedSearches: (j.related_searches || []).map(r => ({ query: r.query })),
+    topStories: (j.top_stories || []).map(t => ({ title: t.title, link: t.link }))
+  };
+}
 function buildQuery(tpl, value, extra) {
   return tpl.replace(/\{value\}/g, (value || "").trim()).replace(/\{extra\}/g, (extra || "").trim()).replace(/\s+/g, " ").trim();
 }
@@ -114,8 +161,20 @@ function flatten(json) {
   o.raw_json = JSON.stringify(json);
   return o;
 }
+function flattenSerpApi(j, aiExtra) {
+  const o = flatten(Object.assign(normalizeSerpApi(j), {}));
+  o.raw_json = JSON.stringify(aiExtra ? { search: j, ai_overview_followup: aiExtra } : j);
+  const ai = (aiExtra && aiExtra.ai_overview) || j.ai_overview;
+  if (ai && ai.error) { o.ai_overview_status = "error: " + ai.error; o.ai_overview_text = ""; o.ai_overview_sources = ""; }
+  else if (ai && (ai.text_blocks || ai.references)) {
+    o.ai_overview_status = aiExtra ? "lazy-loaded" : "inline";
+    o.ai_overview_text = aioText(ai.text_blocks); o.ai_overview_sources = aioSources(ai);
+  } else { o.ai_overview_status = ai && ai.page_token ? "token-expired-or-failed" : "none"; o.ai_overview_text = ""; o.ai_overview_sources = ""; }
+  return o;
+}
 function outFields(fields) {
-  const extra = ["serp_query", "serp_status", "serp_error", "serp_fetched_at", "result_count"];
+  const extra = ["serp_provider", "serp_query", "serp_status", "serp_error", "serp_fetched_at",
+                 "ai_overview_status", "ai_overview_text", "ai_overview_sources", "result_count"];
   for (let i = 1; i <= N; i++) extra.push(`r${i}_title`, `r${i}_link`, `r${i}_snippet`);
   extra.push("answer_box", "knowledge_graph", "people_also_ask", "related_searches", "top_stories", "raw_json");
   return fields.concat(extra.filter(f => !fields.includes(f)));
@@ -146,6 +205,36 @@ async function fetchSerp(key, q, gl, fetchImpl = fetch) {
     return await res.json();
   }
 }
+async function getJson(url, relay, fetchImpl = fetch) {
+  const target = relay ? relay.replace(/\/+$/, "") + "/?url=" + encodeURIComponent(url) : url;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    let res;
+    try { res = await fetchImpl(target); }
+    catch (e) { if (attempt === 4) { const err = new Error("network: " + e.message); err.network = true; throw err; } await sleep(1500 * attempt); continue; }
+    if (res.status === 401 || res.status === 403) { const t = await res.text(); const err = new Error(`HTTP ${res.status}: ${t.slice(0, 150)}`); err.fatal = true; throw err; }
+    if (res.status === 429 || res.status >= 500) { if (attempt === 4) throw new Error(`HTTP ${res.status}`); await sleep(3000 * attempt); continue; }
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok || j.error && !/hasn't returned any results/i.test(j.error)) {
+      const err = new Error(`HTTP ${res.status}: ${(j.error || "").slice(0, 150)}`);
+      if (/invalid api key|run out of searches|account/i.test(j.error || "")) err.fatal = true;
+      throw err;
+    }
+    return j;
+  }
+}
+async function fetchSerpApi(key, q, gl, relay, fetchImpl = fetch) {
+  const p = new URLSearchParams({ engine: "google", q, hl: "en", num: String(N), api_key: key });
+  if (gl) p.set("gl", gl);
+  const j = await getJson("https://serpapi.com/search.json?" + p, relay, fetchImpl);
+  let extra = null;
+  const tok = j.ai_overview && j.ai_overview.page_token;
+  if (tok && !j.ai_overview.text_blocks) {      // lazy-loaded overview: fetch it immediately (token is short-lived)
+    const p2 = new URLSearchParams({ engine: "google_ai_overview", page_token: tok, api_key: key });
+    try { extra = await getJson("https://serpapi.com/search.json?" + p2, relay, fetchImpl); }
+    catch (e) { if (e.fatal) throw e; extra = { ai_overview: { error: e.message } }; }
+  }
+  return flattenSerpApi(j, extra);
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /* ---------- storage (best effort) ---------- */
@@ -171,8 +260,17 @@ function stats() {
     $("sEta").textContent = rate > 0 ? Math.ceil((total - done) / rate) + " min" : "–";
   }
 }
-try { const k = localStorage.getItem("serper_key"); if (k) { $("key").value = k; $("remember").checked = true; } } catch (e) {}
-$("remember").addEventListener("change", () => { try { if (!$("remember").checked) localStorage.removeItem("serper_key"); } catch (e) {} });
+function keyName() { return "key_" + $("prov").value; }
+function provNote() {
+  $("provnote").textContent = $("prov").value === "serpapi"
+    ? "SerpApi: 1 credit per search, 2 when Google lazy-loads the AI Overview (fetched automatically). Not every query gets an AI Overview — that is recorded as 'none'."
+    : "Serper: 1 credit per search. No AI Overview.";
+  try { const k = localStorage.getItem(keyName()) || ($("prov").value === "serper" ? localStorage.getItem("serper_key") : null);
+        $("key").value = k || ""; $("remember").checked = !!k; } catch (e) {}
+}
+try { const pv = localStorage.getItem("serp_prov"); if (pv) $("prov").value = pv; $("relay").value = localStorage.getItem("serp_relay") || ""; } catch (e) {}
+provNote(); $("prov").addEventListener("change", provNote);
+$("remember").addEventListener("change", () => { try { if (!$("remember").checked) localStorage.removeItem(keyName()); } catch (e) {} });
 
 const drop = $("drop");
 drop.addEventListener("click", () => $("file").click());
@@ -211,27 +309,37 @@ $("reset").addEventListener("click", () => { if (!confirm("Clear saved progress 
 
 function start() {
   const key = $("key").value.trim(); if (!key) { alert("Enter your Serper API key first."); return; }
-  try { if ($("remember").checked) localStorage.setItem("serper_key", key); } catch (e) {}
+  try { if ($("remember").checked) localStorage.setItem(keyName(), key); } catch (e) {}
   const col = $("col").value, col2 = $("col2").value, tpl = $("tpl").value, gl = $("gl").value.trim().toLowerCase();
-  S.queue = []; S.rows.forEach((r, i) => { const st = (S.results[i] || {}).serp_status; if (st !== "OK" && (r[col] || "").trim()) S.queue.push(i); });
+  const prov = $("prov").value, relay = $("relay").value.trim();
+  try { localStorage.setItem("serp_relay", relay); localStorage.setItem("serp_prov", prov); } catch (e) {}
+  S.queue = []; S.rows.forEach((r, i) => { const x = S.results[i] || {};
+    const done = x.serp_status === "OK" && (x.serp_provider || "serper") === prov;
+    if (!done && (r[col] || "").trim()) S.queue.push(i); });
+  S.netFails = 0;
   if (!S.queue.length) { logLine("Nothing left to do.", "ok"); return; }
   S.running = true; S.t0 = Date.now(); S.doneAtStart = Object.values(S.results).filter(v => v.serp_status === "OK" || v.serp_status === "ERROR").length;
   $("start").disabled = true; $("pause").disabled = false;
   logLine(`Starting ${S.queue.length} searches with ${$("conc").value} in parallel…`);
   const conc = Math.max(1, Math.min(20, parseInt($("conc").value) || 5));
-  for (let w = 0; w < conc; w++) worker(key, col, col2, tpl, gl);
+  for (let w = 0; w < conc; w++) worker(key, col, col2, tpl, gl, prov, relay);
 }
-async function worker(key, col, col2, tpl, gl) {
+async function worker(key, col, col2, tpl, gl, prov, relay) {
   S.inflight++;
   while (S.running && S.queue.length) {
     const i = S.queue.shift(); const r = S.rows[i];
     const q = buildQuery(tpl, r[col], col2 ? r[col2] : "");
     const now = new Date().toISOString();
     try {
-      const json = await fetchSerp(key, q, gl);
-      S.results[i] = Object.assign({ serp_query: q, serp_status: "OK", serp_error: "", serp_fetched_at: now }, flatten(json));
+      const flat = prov === "serpapi" ? await fetchSerpApi(key, q, gl, relay) : flatten(await fetchSerp(key, q, gl));
+      S.results[i] = Object.assign({ serp_provider: prov, serp_query: q, serp_status: "OK", serp_error: "", serp_fetched_at: now }, flat);
+      S.netFails = 0;
     } catch (e) {
-      S.results[i] = { serp_query: q, serp_status: "ERROR", serp_error: e.message, serp_fetched_at: now };
+      S.results[i] = { serp_provider: prov, serp_query: q, serp_status: "ERROR", serp_error: e.message, serp_fetched_at: now };
+      if (e.network && ++S.netFails >= 3 && !relay) {
+        S.running = false;
+        logLine("Requests are being blocked by the browser (CORS). Set up the free relay (README, ~5 min), paste its URL above and press Start again.", "bad");
+      }
       logLine(`Row ${i + 1} (${r[col]}): ${e.message}`, "bad");
       if (e.fatal) { S.running = false; logLine("Stopped: check the API key or your Serper credits.", "bad"); }
     }
@@ -253,7 +361,7 @@ function download() {
   a.download = name.replace(/\.csv$/i, "") + "_google_serp.csv"; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
-if (typeof window !== "undefined") window.__serpTest = { buildQuery, flatten, outFields, buildOutput, fetchSerp };
+if (typeof window !== "undefined") window.__serpTest = { buildQuery, flatten, outFields, buildOutput, fetchSerp, fetchSerpApi, aioText };
 </script>
 </body>
 </html>
