@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Google First-Page Scraper</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--muted:#5b6170;--line:#e3e6ec;--accent:#1f6feb;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
+  @media (prefers-color-scheme: dark){:root{--bg:#0f1115;--card:#171a21;--ink:#e8eaf0;--muted:#9aa1b2;--line:#2a2f3a;--accent:#4c8dff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  main{max-width:880px;margin:0 auto;padding:28px 16px 60px}
+  h1{font-size:22px;margin:0 0 4px} .sub{color:var(--muted);margin:0 0 22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+  .card h2{font-size:15px;margin:0 0 12px}
+  label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+  input[type=text],input[type=password],input[type=number],select{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px} @media(max-width:600px){.row{grid-template-columns:1fr}}
+  .check{display:flex;gap:8px;align-items:center;margin-top:10px;font-size:13px;color:var(--muted)} .check input{margin:0}
+  button{padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff} button:disabled{opacity:.5;cursor:not-allowed}
+  .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+  .drop{border:2px dashed var(--line);border-radius:10px;padding:22px;text-align:center;color:var(--muted);cursor:pointer}
+  .drop.on{border-color:var(--accent);color:var(--ink)}
+  .bar{height:10px;background:var(--line);border-radius:6px;overflow:hidden;margin:10px 0} .bar>div{height:100%;width:0;background:var(--accent);transition:width .2s}
+  .stats{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--muted)} .stats b{color:var(--ink)}
+  .log{font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;height:180px;overflow:auto;white-space:pre-wrap;margin-top:10px}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .muted{color:var(--muted);font-size:13px}
+  code{font-size:12.5px;background:var(--bg);padding:1px 5px;border-radius:5px;border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Google First-Page Scraper</h1>
+  <p class="sub">Upload a CSV, get Google's first page for every row via the Serper API, download the results as a new CSV. Runs entirely in your browser.</p>
+
+  <div class="card">
+    <h2>1. Serper API key</h2>
+    <input id="key" type="password" placeholder="Paste your Serper API key" autocomplete="off">
+    <div class="check"><input id="remember" type="checkbox"><span>Remember on this device (stored only in this browser)</span></div>
+    <p class="muted">The key is sent only to google.serper.dev. One search = 1 Serper credit.</p>
+  </div>
+
+  <div class="card">
+    <h2>2. Upload CSV</h2>
+    <div id="drop" class="drop">Drop a CSV here or click to choose<input id="file" type="file" accept=".csv,text/csv" hidden></div>
+    <p id="fileinfo" class="muted"></p>
+    <div class="row">
+      <div><label for="col">Column with the company / search term</label><select id="col" disabled></select></div>
+      <div><label for="col2">Optional second column (e.g. domain) — use as {extra}</label><select id="col2" disabled><option value="">(none)</option></select></div>
+    </div>
+    <label for="tpl">Search query template — <code>{value}</code> = first column, <code>{extra}</code> = second</label>
+    <input id="tpl" type="text" value="{value} is an AMD channel reseller">
+    <div class="row">
+      <div><label for="gl">Country (gl, optional, e.g. au, in, sg)</label><input id="gl" type="text" placeholder="(Google default)"></div>
+      <div><label for="conc">Parallel requests</label><input id="conc" type="number" min="1" max="20" value="5"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3. Run</h2>
+    <div class="actions">
+      <button id="start" class="primary" disabled>Start</button>
+      <button id="pause" disabled>Pause</button>
+      <button id="dl" disabled>Download results CSV</button>
+      <button id="reset" disabled>Clear saved progress</button>
+    </div>
+    <div class="bar"><div id="prog"></div></div>
+    <div class="stats">
+      <span>Done <b id="sDone">0</b> / <b id="sTotal">0</b></span>
+      <span class="ok">OK <b id="sOk">0</b></span>
+      <span class="bad">Errors <b id="sErr">0</b></span>
+      <span>Speed <b id="sRate">–</b>/min</span>
+      <span>ETA <b id="sEta">–</b></span>
+    </div>
+    <div id="log" class="log"></div>
+    <p class="muted">Progress is saved in this browser after every row. If the tab closes, re-open the page, upload the same CSV and press Start — finished rows are skipped. Download any time; unfinished rows are left blank.</p>
+  </div>
+
+  <div class="card">
+    <h2>What the output CSV contains</h2>
+    <p class="muted">All your original columns, unchanged and in order, plus: <code>serp_query</code>, <code>serp_status</code>, <code>serp_error</code>, <code>serp_fetched_at</code>, <code>result_count</code>, <code>r1_title … r10_title</code>, <code>r1_link … r10_link</code>, <code>r1_snippet … r10_snippet</code>, <code>answer_box</code>, <code>knowledge_graph</code>, <code>people_also_ask</code>, <code>related_searches</code>, <code>top_stories</code>, <code>raw_json</code> (the full Serper response for that row). Google's AI Overview is not included — Serper does not return it.</p>
+  </div>
+</main>
+
+<script>
+"use strict";
+const SERPER = "https://google.serper.dev/search";
+const N = 10;
+const $ = id => document.getElementById(id);
+const S = { rows: [], fields: [], fileKey: "", results: {}, running: false, queue: [], inflight: 0, t0: 0, doneAtStart: 0 };
+
+/* ---------- pure helpers (also unit-tested) ---------- */
+function buildQuery(tpl, value, extra) {
+  return tpl.replace(/\{value\}/g, (value || "").trim()).replace(/\{extra\}/g, (extra || "").trim()).replace(/\s+/g, " ").trim();
+}
+function oneLine(s) { return (s == null ? "" : String(s)).replace(/\s+/g, " ").trim(); }
+function flatten(json) {
+  const o = {};
+  const org = (json && json.organic) || [];
+  o.result_count = String(org.length);
+  for (let i = 1; i <= N; i++) {
+    const r = org[i - 1] || {};
+    o[`r${i}_title`] = oneLine(r.title); o[`r${i}_link`] = oneLine(r.link); o[`r${i}_snippet`] = oneLine(r.snippet);
+  }
+  const ab = json.answerBox;
+  o.answer_box = ab ? oneLine([ab.title, ab.answer, ab.snippet, ab.link].filter(Boolean).join(" | ")) : "";
+  const kg = json.knowledgeGraph;
+  o.knowledge_graph = kg ? oneLine([kg.title, kg.type, kg.description, kg.website,
+      kg.attributes ? Object.entries(kg.attributes).map(([k, v]) => `${k}: ${v}`).join("; ") : ""].filter(Boolean).join(" | ")) : "";
+  o.people_also_ask = oneLine((json.peopleAlsoAsk || []).map(p => `${p.question} — ${p.snippet || ""} (${p.link || ""})`).join(" || "));
+  o.related_searches = oneLine((json.relatedSearches || []).map(r => r.query).join(" | "));
+  o.top_stories = oneLine((json.topStories || []).map(t => `${t.title} (${t.link})`).join(" || "));
+  o.raw_json = JSON.stringify(json);
+  return o;
+}
+function outFields(fields) {
+  const extra = ["serp_query", "serp_status", "serp_error", "serp_fetched_at", "result_count"];
+  for (let i = 1; i <= N; i++) extra.push(`r${i}_title`, `r${i}_link`, `r${i}_snippet`);
+  extra.push("answer_box", "knowledge_graph", "people_also_ask", "related_searches", "top_stories", "raw_json");
+  return fields.concat(extra.filter(f => !fields.includes(f)));
+}
+function buildOutput(rows, fields, results) {
+  const of = outFields(fields);
+  const data = rows.map((r, i) => {
+    const res = results[i] || { serp_status: "PENDING" };
+    const o = {};
+    of.forEach(f => { o[f] = f in r ? r[f] : (res[f] != null ? res[f] : ""); });
+    return o;
+  });
+  return { fields: of, data };
+}
+async function fetchSerp(key, q, gl, fetchImpl = fetch) {
+  const body = { q, num: N, hl: "en" }; if (gl) body.gl = gl;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    let res;
+    try {
+      res = await fetchImpl(SERPER, { method: "POST", headers: { "X-API-KEY": key, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } catch (e) {
+      if (attempt === 4) throw new Error("network: " + e.message);
+      await sleep(1500 * attempt); continue;
+    }
+    if (res.status === 401 || res.status === 403) { const t = await res.text(); const err = new Error(`HTTP ${res.status}: ${t.slice(0, 150)}`); err.fatal = true; throw err; }
+    if (res.status === 429 || res.status >= 500) { if (attempt === 4) throw new Error(`HTTP ${res.status}`); await sleep(3000 * attempt); continue; }
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 150)}`);
+    return await res.json();
+  }
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---------- storage (best effort) ---------- */
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
+function storeKey() { return "serp_progress_" + S.fileKey; }
+function saveProgress() {
+  try { localStorage.setItem(storeKey(), JSON.stringify(S.results)); return true; }
+  catch (e) { if (!S.warnedQuota) { logLine("Browser storage is full — progress is kept in this tab only. Download regularly.", "warn"); S.warnedQuota = true; } return false; }
+}
+function loadProgress() { try { return JSON.parse(localStorage.getItem(storeKey()) || "{}"); } catch (e) { return {}; } }
+
+/* ---------- UI ---------- */
+function logLine(t, cls) { const d = document.createElement("div"); if (cls) d.className = cls; d.textContent = `${new Date().toLocaleTimeString()}  ${t}`; $("log").appendChild(d); $("log").scrollTop = 1e9; }
+function stats() {
+  const total = S.rows.length, vals = Object.values(S.results);
+  const done = vals.filter(v => v.serp_status === "OK" || v.serp_status === "ERROR").length;
+  const ok = vals.filter(v => v.serp_status === "OK").length, err = done - ok;
+  $("sDone").textContent = done; $("sTotal").textContent = total; $("sOk").textContent = ok; $("sErr").textContent = err;
+  $("prog").style.width = total ? (100 * done / total).toFixed(1) + "%" : "0";
+  if (S.running && S.t0) {
+    const mins = (Date.now() - S.t0) / 60000, rate = (done - S.doneAtStart) / Math.max(mins, 0.01);
+    $("sRate").textContent = rate ? rate.toFixed(0) : "–";
+    $("sEta").textContent = rate > 0 ? Math.ceil((total - done) / rate) + " min" : "–";
+  }
+}
+try { const k = localStorage.getItem("serper_key"); if (k) { $("key").value = k; $("remember").checked = true; } } catch (e) {}
+$("remember").addEventListener("change", () => { try { if (!$("remember").checked) localStorage.removeItem("serper_key"); } catch (e) {} });
+
+const drop = $("drop");
+drop.addEventListener("click", () => $("file").click());
+drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("on"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("on"));
+drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("on"); if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+$("file").addEventListener("change", e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+
+function loadFile(file) {
+  file.text().then(text => {
+    // skip leading empty lines such as ",,"
+    const lines = text.split(/\r?\n/); let skip = 0;
+    while (skip < lines.length && !lines[skip].replace(/[,;\s"]/g, "")) skip++;
+    const body = lines.slice(skip).join("\n");
+    const p = Papa.parse(body, { header: true, skipEmptyLines: "greedy" });
+    S.fields = (p.meta.fields || []).map(f => f.trim()); S.rows = p.data.map(r => { const o = {}; Object.keys(r).forEach(k => o[k.trim()] = r[k]); return o; });
+    S.fileKey = hashStr(file.name + "|" + body.length + "|" + body.slice(0, 2000));
+    S.results = loadProgress();
+    const guess = S.fields.find(f => /company|name/i.test(f)) || S.fields[0];
+    const guess2 = S.fields.find(f => /domain|website/i.test(f)) || "";
+    $("col").innerHTML = S.fields.map(f => `<option${f === guess ? " selected" : ""}>${escapeHtml(f)}</option>`).join("");
+    $("col2").innerHTML = `<option value="">(none)</option>` + S.fields.map(f => `<option${f === guess2 ? " selected" : ""}>${escapeHtml(f)}</option>`).join("");
+    $("col").disabled = $("col2").disabled = false;
+    $("fileinfo").textContent = `${file.name}: ${S.rows.length} rows, ${S.fields.length} columns` + (skip ? ` (skipped ${skip} empty leading line${skip > 1 ? "s" : ""})` : "") +
+      (Object.keys(S.results).length ? ` — ${Object.keys(S.results).length} rows already done earlier, they will be skipped` : "");
+    ["start", "dl", "reset"].forEach(id => $(id).disabled = false);
+    stats(); logLine(`Loaded ${file.name} (${S.rows.length} rows).`);
+  });
+}
+function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+$("start").addEventListener("click", start);
+$("pause").addEventListener("click", () => { S.running = false; $("pause").disabled = true; $("start").disabled = false; logLine("Pausing after requests in flight finish…"); });
+$("dl").addEventListener("click", download);
+$("reset").addEventListener("click", () => { if (!confirm("Clear saved progress for this file?")) return; S.results = {}; try { localStorage.removeItem(storeKey()); } catch (e) {} stats(); logLine("Progress cleared."); });
+
+function start() {
+  const key = $("key").value.trim(); if (!key) { alert("Enter your Serper API key first."); return; }
+  try { if ($("remember").checked) localStorage.setItem("serper_key", key); } catch (e) {}
+  const col = $("col").value, col2 = $("col2").value, tpl = $("tpl").value, gl = $("gl").value.trim().toLowerCase();
+  S.queue = []; S.rows.forEach((r, i) => { const st = (S.results[i] || {}).serp_status; if (st !== "OK" && (r[col] || "").trim()) S.queue.push(i); });
+  if (!S.queue.length) { logLine("Nothing left to do.", "ok"); return; }
+  S.running = true; S.t0 = Date.now(); S.doneAtStart = Object.values(S.results).filter(v => v.serp_status === "OK" || v.serp_status === "ERROR").length;
+  $("start").disabled = true; $("pause").disabled = false;
+  logLine(`Starting ${S.queue.length} searches with ${$("conc").value} in parallel…`);
+  const conc = Math.max(1, Math.min(20, parseInt($("conc").value) || 5));
+  for (let w = 0; w < conc; w++) worker(key, col, col2, tpl, gl);
+}
+async function worker(key, col, col2, tpl, gl) {
+  S.inflight++;
+  while (S.running && S.queue.length) {
+    const i = S.queue.shift(); const r = S.rows[i];
+    const q = buildQuery(tpl, r[col], col2 ? r[col2] : "");
+    const now = new Date().toISOString();
+    try {
+      const json = await fetchSerp(key, q, gl);
+      S.results[i] = Object.assign({ serp_query: q, serp_status: "OK", serp_error: "", serp_fetched_at: now }, flatten(json));
+    } catch (e) {
+      S.results[i] = { serp_query: q, serp_status: "ERROR", serp_error: e.message, serp_fetched_at: now };
+      logLine(`Row ${i + 1} (${r[col]}): ${e.message}`, "bad");
+      if (e.fatal) { S.running = false; logLine("Stopped: check the API key or your Serper credits.", "bad"); }
+    }
+    saveProgress(); stats();
+  }
+  S.inflight--;
+  if (S.inflight === 0) {
+    $("start").disabled = false; $("pause").disabled = true;
+    logLine(S.queue.length ? "Paused. Press Start to continue." : "Finished. Download the results CSV.", S.queue.length ? "warn" : "ok");
+    stats();
+  }
+}
+function download() {
+  const { fields, data } = buildOutput(S.rows, S.fields, S.results);
+  const csv = Papa.unparse({ fields, data });
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  const name = ($("file").files[0] && $("file").files[0].name) || "input.csv";
+  a.download = name.replace(/\.csv$/i, "") + "_google_serp.csv"; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+if (typeof window !== "undefined") window.__serpTest = { buildQuery, flatten, outFields, buildOutput, fetchSerp };
+</script>
+</body>
+</html>
