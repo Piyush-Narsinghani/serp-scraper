@@ -336,8 +336,8 @@ async function worker(key, col, col2, tpl, gl, prov, relay) {
       S.netFails = 0;
     } catch (e) {
       S.results[i] = { serp_provider: prov, serp_query: q, serp_status: "ERROR", serp_error: e.message, serp_fetched_at: now };
-      if (e.network && ++S.netFails >= 3 && !relay) {
-        S.running = false;
+      if (e.network && ++S.netFails >= 3 && !relay && S.running) {
+        S.running = false; S.queue.unshift(i);
         logLine("Requests are being blocked by the browser (CORS). Set up the free relay (README, ~5 min), paste its URL above and press Start again.", "bad");
       }
       logLine(`Row ${i + 1} (${r[col]}): ${e.message}`, "bad");
