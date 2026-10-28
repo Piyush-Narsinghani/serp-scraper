@@ -212,7 +212,16 @@ async function getJson(url, relay, fetchImpl = fetch) {
     try { res = await fetchImpl(target); }
     catch (e) { if (attempt === 4) { const err = new Error("network: " + e.message); err.network = true; throw err; } await sleep(1500 * attempt); continue; }
     if (res.status === 401 || res.status === 403) { const t = await res.text(); const err = new Error(`HTTP ${res.status}: ${t.slice(0, 150)}`); err.fatal = true; throw err; }
-    if (res.status === 429 || res.status >= 500) { if (attempt === 4) throw new Error(`HTTP ${res.status}`); await sleep(3000 * attempt); continue; }
+    if (res.status === 429) {
+      const t = await res.text(); let msg = t; try { msg = JSON.parse(t).error || t; } catch (e) {}
+      if (/run out of searches|exceeded|quota|plan/i.test(msg) && !/hourly|throughput|per hour|too many requests/i.test(msg)) {
+        const err = new Error("HTTP 429: " + msg.slice(0, 160)); err.fatal = true; throw err;
+      }
+      if (attempt === 4) throw new Error("HTTP 429: " + msg.slice(0, 160));
+      S.coolUntil = Date.now() + 20000 * attempt;          // all workers pause together
+      await sleep(20000 * attempt); continue;
+    }
+    if (res.status >= 500) { if (attempt === 4) throw new Error(`HTTP ${res.status}`); await sleep(3000 * attempt); continue; }
     const j = await res.json().catch(() => ({}));
     if (!res.ok || j.error && !/hasn't returned any results/i.test(j.error)) {
       const err = new Error(`HTTP ${res.status}: ${(j.error || "").slice(0, 150)}`);
@@ -240,11 +249,49 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 /* ---------- storage (best effort) ---------- */
 function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); }
 function storeKey() { return "serp_progress_" + S.fileKey; }
-function saveProgress() {
-  try { localStorage.setItem(storeKey(), JSON.stringify(S.results)); return true; }
-  catch (e) { if (!S.warnedQuota) { logLine("Browser storage is full — progress is kept in this tab only. Download regularly.", "warn"); S.warnedQuota = true; } return false; }
+let DBP = null;
+function db() {
+  if (!DBP) DBP = new Promise((res, rej) => {
+    const r = indexedDB.open("serp_scraper", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("rows");
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  return DBP;
 }
-function loadProgress() { try { return JSON.parse(localStorage.getItem(storeKey()) || "{}"); } catch (e) { return {}; } }
+async function saveRow(i) {
+  try {
+    const d = await db();
+    await new Promise((res, rej) => { const tx = d.transaction("rows", "readwrite");
+      tx.objectStore("rows").put(S.results[i], S.fileKey + ":" + String(i).padStart(6, "0"));
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+  } catch (e) {
+    if (!S.warnedQuota) { logLine("Could not save progress in this browser (" + e.message + "). Download regularly.", "warn"); S.warnedQuota = true; }
+  }
+}
+async function loadProgress() {
+  const out = {};
+  try {
+    const d = await db();
+    await new Promise((res, rej) => {
+      const tx = d.transaction("rows", "readonly"), st = tx.objectStore("rows");
+      const range = IDBKeyRange.bound(S.fileKey + ":", S.fileKey + ":\uffff");
+      const rq = st.openCursor(range);
+      rq.onsuccess = () => { const c = rq.result; if (c) { out[parseInt(String(c.key).split(":")[1], 10)] = c.value; c.continue(); } else res(); };
+      rq.onerror = () => rej(rq.error);
+    });
+  } catch (e) {}
+  try {   // migrate older localStorage progress, then free that space
+    const old = JSON.parse(localStorage.getItem(storeKey()) || "{}");
+    Object.keys(old).forEach(k => { if (!out[k]) { out[k] = old[k]; } });
+    localStorage.removeItem(storeKey());
+  } catch (e) {}
+  return out;
+}
+async function clearProgress() {
+  try { const d = await db(); await new Promise(res => { const tx = d.transaction("rows", "readwrite");
+    tx.objectStore("rows").delete(IDBKeyRange.bound(S.fileKey + ":", S.fileKey + ":\uffff")); tx.oncomplete = res; tx.onerror = res; }); } catch (e) {}
+  try { localStorage.removeItem(storeKey()); } catch (e) {}
+}
 
 /* ---------- UI ---------- */
 function logLine(t, cls) { const d = document.createElement("div"); if (cls) d.className = cls; d.textContent = `${new Date().toLocaleTimeString()}  ${t}`; $("log").appendChild(d); $("log").scrollTop = 1e9; }
@@ -280,7 +327,7 @@ drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("
 $("file").addEventListener("change", e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
 
 function loadFile(file) {
-  file.text().then(text => {
+  file.text().then(async text => {
     // skip leading empty lines such as ",,"
     const lines = text.split(/\r?\n/); let skip = 0;
     while (skip < lines.length && !lines[skip].replace(/[,;\s"]/g, "")) skip++;
@@ -288,7 +335,8 @@ function loadFile(file) {
     const p = Papa.parse(body, { header: true, skipEmptyLines: "greedy" });
     S.fields = (p.meta.fields || []).map(f => f.trim()); S.rows = p.data.map(r => { const o = {}; Object.keys(r).forEach(k => o[k.trim()] = r[k]); return o; });
     S.fileKey = hashStr(file.name + "|" + body.length + "|" + body.slice(0, 2000));
-    S.results = loadProgress();
+    S.results = await loadProgress();
+    Object.keys(S.results).forEach(k => saveRow(k));
     const guess = S.fields.find(f => /company|name/i.test(f)) || S.fields[0];
     const guess2 = S.fields.find(f => /domain|website/i.test(f)) || "";
     $("col").innerHTML = S.fields.map(f => `<option${f === guess ? " selected" : ""}>${escapeHtml(f)}</option>`).join("");
@@ -305,9 +353,9 @@ function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": 
 $("start").addEventListener("click", start);
 $("pause").addEventListener("click", () => { S.running = false; $("pause").disabled = true; $("start").disabled = false; logLine("Pausing after requests in flight finish…"); });
 $("dl").addEventListener("click", download);
-$("reset").addEventListener("click", () => { if (!confirm("Clear saved progress for this file?")) return; S.results = {}; try { localStorage.removeItem(storeKey()); } catch (e) {} stats(); logLine("Progress cleared."); });
+$("reset").addEventListener("click", () => { if (!confirm("Clear saved progress for this file?")) return; S.results = {}; clearProgress(); stats(); logLine("Progress cleared."); });
 
-function start() {
+async function start() {
   const key = $("key").value.trim(); if (!key) { alert("Enter your Serper API key first."); return; }
   try { if ($("remember").checked) localStorage.setItem(keyName(), key); } catch (e) {}
   const col = $("col").value, col2 = $("col2").value, tpl = $("tpl").value, gl = $("gl").value.trim().toLowerCase();
@@ -318,15 +366,27 @@ function start() {
     if (!done && (r[col] || "").trim()) S.queue.push(i); });
   S.netFails = 0;
   if (!S.queue.length) { logLine("Nothing left to do.", "ok"); return; }
+  if (prov === "serpapi") {
+    try {
+      const a = await getJson("https://serpapi.com/account.json?api_key=" + encodeURIComponent(key), relay);
+      const left = a.total_searches_left != null ? a.total_searches_left : a.plan_searches_left;
+      logLine(`SerpApi plan: ${a.plan_name || "?"} — ${left} searches left this month` +
+              (a.account_rate_limit_per_hour ? `, limit ${a.account_rate_limit_per_hour}/hour` : "") +
+              `. This run needs about ${S.queue.length}–${Math.round(S.queue.length * 1.3)}.`, left < S.queue.length ? "warn" : "ok");
+      if (left === 0) { logLine("No searches left on this SerpApi plan — upgrade or wait for the monthly reset.", "bad"); return; }
+    } catch (e) { logLine("Could not read SerpApi account info (" + e.message + ").", "warn"); }
+  }
   S.running = true; S.t0 = Date.now(); S.doneAtStart = Object.values(S.results).filter(v => v.serp_status === "OK" || v.serp_status === "ERROR").length;
   $("start").disabled = true; $("pause").disabled = false;
-  logLine(`Starting ${S.queue.length} searches with ${$("conc").value} in parallel…`);
+  logLine(`Starting ${S.queue.length} searches with ${Math.max(1, Math.min(20, parseInt($("conc").value) || 5))} in parallel…`);
   const conc = Math.max(1, Math.min(20, parseInt($("conc").value) || 5));
   for (let w = 0; w < conc; w++) worker(key, col, col2, tpl, gl, prov, relay);
 }
 async function worker(key, col, col2, tpl, gl, prov, relay) {
   S.inflight++;
   while (S.running && S.queue.length) {
+    while (S.coolUntil && Date.now() < S.coolUntil && S.running) await sleep(1000);
+    if (!S.running) break;
     const i = S.queue.shift(); const r = S.rows[i];
     const q = buildQuery(tpl, r[col], col2 ? r[col2] : "");
     const now = new Date().toISOString();
@@ -341,9 +401,10 @@ async function worker(key, col, col2, tpl, gl, prov, relay) {
         logLine("Requests are being blocked by the browser (CORS). Set up the free relay (README, ~5 min), paste its URL above and press Start again.", "bad");
       }
       logLine(`Row ${i + 1} (${r[col]}): ${e.message}`, "bad");
-      if (e.fatal) { S.running = false; logLine("Stopped: check the API key or your Serper credits.", "bad"); }
+      if (e.fatal) { if (S.running) { S.running = false; S.queue.unshift(i);
+        logLine("Stopped: " + e.message + " — check the API key / remaining searches on your plan.", "bad"); } }
     }
-    saveProgress(); stats();
+    saveRow(i); stats();
   }
   S.inflight--;
   if (S.inflight === 0) {
