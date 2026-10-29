@@ -77,7 +77,10 @@
     <label for="tpl">Search query template — <code>{value}</code> = first column, <code>{extra}</code> = second</label>
     <input id="tpl" type="text" value="{value} is an AMD channel reseller">
     <div class="check"><input id="limode" type="checkbox"><span>LinkedIn finder: pick the LinkedIn profile out of the results (adds <code>linkedin_google_url</code>, match strength and <code>linkedin_final</code>; rows that already have a <code>linkedin_url</code> are skipped and cost nothing)</span></div>
-    <div class="actions"><button id="lipreset" type="button">Use LinkedIn search preset</button></div>
+    <div class="row">
+      <div><label for="listop">Stop automatically when this many LinkedIns are found (optional)</label><input id="listop" type="number" min="1" placeholder="e.g. 1500"></div>
+      <div><label>&nbsp;</label><div class="actions" style="margin-top:0"><button id="lipreset" type="button">Use LinkedIn search preset</button></div></div>
+    </div>
     <div class="row">
       <div><label for="gl">Country (gl, optional, e.g. au, in, sg)</label><input id="gl" type="text" placeholder="(Google default)"></div>
       <div><label for="conc">Parallel requests</label><input id="conc" type="number" min="1" max="20" value="5"></div>
@@ -97,6 +100,7 @@
       <span>Done <b id="sDone">0</b> / <b id="sTotal">0</b></span>
       <span class="ok">OK <b id="sOk">0</b></span>
       <span class="bad">Errors <b id="sErr">0</b></span>
+      <span id="sLiWrap" hidden>LinkedIns <b id="sLi">0</b></span>
       <span>Speed <b id="sRate">–</b>/min</span>
       <span>ETA <b id="sEta">–</b></span>
     </div>
@@ -431,11 +435,23 @@ function stats() {
   const ok = vals.filter(v => v.serp_status === "OK" || v.serp_status === "SKIPPED").length, err = done - ok;
   $("sDone").textContent = done; $("sTotal").textContent = total; $("sOk").textContent = ok; $("sErr").textContent = err;
   $("prog").style.width = total ? (100 * done / total).toFixed(1) + "%" : "0";
+  $("sLiWrap").hidden = !$("limode").checked;
+  if ($("limode").checked) $("sLi").textContent = liCount();
   if (S.running && S.t0) {
     const mins = (Date.now() - S.t0) / 60000, rate = (done - S.doneAtStart) / Math.max(mins, 0.01);
     $("sRate").textContent = rate ? rate.toFixed(0) : "–";
     $("sEta").textContent = rate > 0 ? Math.ceil((total - done) / rate) + " min" : "–";
   }
+}
+function liCount() {
+  // rows with a usable LinkedIn: already known from input, or a strong/partial Google match
+  const nc = $("col").value; let n = 0;
+  S.rows.forEach((r, i) => {
+    if (liFromText(r.linkedin_url)) { n++; return; }
+    const res = S.results[i]; if (!res || res.serp_status !== "OK") return;
+    const m = pickLinkedIn(res, r[nc]).linkedin_google_match; if (m === "strong" || m === "partial") n++;
+  });
+  return n;
 }
 function keyName() { return "key_" + $("prov").value; }
 function provNote() {
@@ -493,6 +509,7 @@ function liPreset() {
   if ($("prov").value !== "serper") { $("prov").value = "serper"; provNote(); }
 }
 $("lipreset").addEventListener("click", liPreset);
+$("limode").addEventListener("change", stats);
 
 /* ---------- GitHub list UI ---------- */
 async function idbGet(k) { try { const d = await db(); return await new Promise(res => { const rq = d.transaction("rows").objectStore("rows").get(k); rq.onsuccess = () => res(rq.result); rq.onerror = () => res(null); }); } catch (e) { return null; } }
@@ -590,6 +607,10 @@ async function worker(key, col, col2, tpl, gl, prov, relay) {
         logLine("Stopped: " + e.message + " — check the API key / remaining searches on your plan.", "bad"); } }
     }
     saveRow(i); stats();
+    const goal = parseInt($("listop").value, 10);
+    if (S.running && $("limode").checked && goal > 0 && liCount() >= goal) {
+      S.running = false; logLine(`Reached ${goal} LinkedIns — stopped. Download the results (rows not searched stay blank).`, "ok");
+    }
   }
   S.inflight--;
   if (S.inflight === 0) {
