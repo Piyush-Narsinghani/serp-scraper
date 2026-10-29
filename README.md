@@ -22,3 +22,10 @@ Set up the free relay once (~5 minutes):
 3. Copy the worker URL (e.g. `https://serp-relay.<you>.workers.dev`) into the page's **Relay URL** box and press **Start**.
 
 The relay only forwards to serpapi.com and stores nothing.
+
+## GitHub influencers → LinkedIn
+The **GitHub influencers → LinkedIn** card fetches the top N GitHub users by followers (GitHub token, no scopes; ~42 paced requests for 2,000 users) and records any LinkedIn they show on GitHub. You can also upload the CSV from `github_influencers_linkedin.py`; the page detects it automatically.
+
+Press **Use LinkedIn search preset** (set automatically for these lists): it searches `"Name" Company site:linkedin.com/in` with Serper, **skips rows that already have a `linkedin_url`** (no credit used) and adds:
+`linkedin_final`, `linkedin_final_source` (github_… / personal_website / google_strong / google_partial / google_weak (check) / not found), `linkedin_google_url`, `linkedin_google_title`, `linkedin_google_match`, `linkedin_google_rank`.
+`strong` = every word of the name is in the LinkedIn title/URL (2+ words); `partial` = some words or a one-word name — spot-check those; `weak` matches are not copied into `linkedin_final`.

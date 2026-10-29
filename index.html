@@ -52,6 +52,21 @@
   </div>
 
   <div class="card">
+    <h2>GitHub influencers → LinkedIn (optional)</h2>
+    <p class="muted">Builds the list of the top GitHub users by followers straight from GitHub (paced to avoid blocks), records any LinkedIn they show on their GitHub profile, then loads them below so step 3 googles only the people still missing a LinkedIn. Use <b>Serper</b> as the provider here — it is cheaper and the AI Overview isn't needed.</p>
+    <div class="row">
+      <div><label for="ghtok">GitHub token (classic, no scopes needed)</label><input id="ghtok" type="password" placeholder="ghp_…" autocomplete="off"></div>
+      <div><label for="ghn">How many top users</label><input id="ghn" type="number" min="10" max="5000" value="2000"></div>
+    </div>
+    <div class="actions">
+      <button id="ghgo" class="primary">Fetch top GitHub users</button>
+      <button id="ghsaved" disabled>Use last saved list</button>
+      <button id="ghdl" disabled>Download GitHub list CSV</button>
+    </div>
+    <p id="ghinfo" class="muted"></p>
+  </div>
+
+  <div class="card">
     <h2>2. Upload CSV</h2>
     <div id="drop" class="drop">Drop a CSV here or click to choose<input id="file" type="file" accept=".csv,text/csv" hidden></div>
     <p id="fileinfo" class="muted"></p>
@@ -61,6 +76,8 @@
     </div>
     <label for="tpl">Search query template — <code>{value}</code> = first column, <code>{extra}</code> = second</label>
     <input id="tpl" type="text" value="{value} is an AMD channel reseller">
+    <div class="check"><input id="limode" type="checkbox"><span>LinkedIn finder: pick the LinkedIn profile out of the results (adds <code>linkedin_google_url</code>, match strength and <code>linkedin_final</code>; rows that already have a <code>linkedin_url</code> are skipped and cost nothing)</span></div>
+    <div class="actions"><button id="lipreset" type="button">Use LinkedIn search preset</button></div>
     <div class="row">
       <div><label for="gl">Country (gl, optional, e.g. au, in, sg)</label><input id="gl" type="text" placeholder="(Google default)"></div>
       <div><label for="conc">Parallel requests</label><input id="conc" type="number" min="1" max="20" value="5"></div>
@@ -172,23 +189,136 @@ function flattenSerpApi(j, aiExtra) {
   } else { o.ai_overview_status = ai && ai.page_token ? "token-expired-or-failed" : "none"; o.ai_overview_text = ""; o.ai_overview_sources = ""; }
   return o;
 }
-function outFields(fields) {
-  const extra = ["serp_provider", "serp_query", "serp_status", "serp_error", "serp_fetched_at",
-                 "ai_overview_status", "ai_overview_text", "ai_overview_sources", "result_count"];
+/* ---------- LinkedIn helpers ---------- */
+const LI_RE = /(?:https?:\/\/)?(?:[a-z]{2,3}\.)?linkedin\.com\/(?:in|pub)\/([A-Za-z0-9\-_%.]+)/i;
+function liFromText(t) {
+  const m = LI_RE.exec(t || ""); if (!m) return "";
+  const slug = m[1].replace(/[\/.]+$/, ""); return slug ? "https://www.linkedin.com/in/" + slug : "";
+}
+function liFromGithub(u) {
+  for (const a of ((u.socialAccounts || {}).nodes || [])) {
+    if (/linkedin/i.test(a.provider || "") || /linkedin\.com/i.test(a.url || "")) { const l = liFromText(a.url); if (l) return [l, "github_social_account"]; }
+  }
+  let l = liFromText(u.websiteUrl); if (l) return [l, "github_website_field"];
+  l = liFromText(u.bio); if (l) return [l, "github_bio"];
+  return ["", ""];
+}
+function nameTokens(s) {
+  return (s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .split(/[^a-z0-9Ѐ-鿿]+/).filter(w => w.length >= 2);
+}
+function pickLinkedIn(res, name) {
+  // first linkedin.com/in result; match = strong (all name words in title/url), partial (some), weak (none)
+  const toks = nameTokens(name);
+  for (let i = 1; i <= N; i++) {
+    const url = liFromText(res[`r${i}_link`]); if (!url) continue;
+    const hay = nameTokens((res[`r${i}_title`] || "") + " " + url.replace(/-/g, " ")).join(" ");
+    const hit = toks.filter(t => hay.includes(t)).length;
+    const match = !toks.length ? "weak" : (hit === toks.length && toks.length >= 2) ? "strong" : hit ? "partial" : "weak";
+    return { linkedin_google_url: url, linkedin_google_title: res[`r${i}_title`] || "", linkedin_google_match: match, linkedin_google_rank: String(i) };
+  }
+  return { linkedin_google_url: "", linkedin_google_title: "", linkedin_google_match: res.serp_status === "OK" ? "not found" : "", linkedin_google_rank: "" };
+}
+const LI_COLS = ["linkedin_final", "linkedin_final_source", "linkedin_google_url", "linkedin_google_title", "linkedin_google_match", "linkedin_google_rank"];
+
+function outFields(fields, li) {
+  const extra = (li ? LI_COLS.slice() : []).concat(["serp_provider", "serp_query", "serp_status", "serp_error", "serp_fetched_at",
+                 "ai_overview_status", "ai_overview_text", "ai_overview_sources", "result_count"]);
   for (let i = 1; i <= N; i++) extra.push(`r${i}_title`, `r${i}_link`, `r${i}_snippet`);
   extra.push("answer_box", "knowledge_graph", "people_also_ask", "related_searches", "top_stories", "raw_json");
   return fields.concat(extra.filter(f => !fields.includes(f)));
 }
-function buildOutput(rows, fields, results) {
-  const of = outFields(fields);
+function buildOutput(rows, fields, results, opts) {
+  opts = opts || {};
+  const of = outFields(fields, opts.li);
   const data = rows.map((r, i) => {
-    const res = results[i] || { serp_status: "PENDING" };
+    const res = Object.assign({}, results[i] || { serp_status: "PENDING" });
+    if (opts.li) {
+      Object.assign(res, pickLinkedIn(res, opts.nameCol ? r[opts.nameCol] : ""));
+      const own = liFromText(r.linkedin_url);
+      if (own) { res.linkedin_final = own; res.linkedin_final_source = r.linkedin_source || "input"; res.linkedin_google_match = res.linkedin_google_match || "skipped (has linkedin)"; }
+      else if (res.linkedin_google_url && res.linkedin_google_match !== "weak") { res.linkedin_final = res.linkedin_google_url; res.linkedin_final_source = "google_" + res.linkedin_google_match; }
+      else { res.linkedin_final = ""; res.linkedin_final_source = res.linkedin_google_url ? "google_weak (check)" : (res.serp_status === "OK" ? "not found" : ""); }
+    }
     const o = {};
     of.forEach(f => { o[f] = f in r ? r[f] : (res[f] != null ? res[f] : ""); });
     return o;
   });
   return { fields: of, data };
 }
+
+/* ---------- GitHub top users (browser, paced) ---------- */
+const GH_Q = `query($q:String!,$cursor:String){search(query:$q,type:USER,first:50,after:$cursor){pageInfo{hasNextPage endCursor}
+ nodes{... on User{login name url company location bio websiteUrl twitterUsername followers{totalCount} socialAccounts(first:10){nodes{provider url}}}}}}`;
+async function ghGql(token, q, cursor, fetchImpl = fetch, log = () => {}) {
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    let res;
+    try {
+      res = await fetchImpl("https://api.github.com/graphql", { method: "POST",
+        headers: { Authorization: "bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ query: GH_Q, variables: { q, cursor } }) });
+    } catch (e) { if (attempt === 8) throw new Error("network: " + e.message); await sleep(5000 * attempt); continue; }
+    if (res.status === 401) { const err = new Error("GitHub token rejected (401)"); err.fatal = true; throw err; }
+    const txt = await res.text();
+    const limited = res.status === 403 || res.status === 429 || /RATE_LIMITED|secondary rate limit|abuse/i.test(txt);
+    if (limited) {
+      const ra = parseInt(res.headers.get("retry-after") || "0", 10);
+      const reset = parseInt(res.headers.get("x-ratelimit-reset") || "0", 10);
+      const rem = res.headers.get("x-ratelimit-remaining");
+      let wait = ra ? ra + 2 : (rem === "0" && reset ? Math.max(reset - Date.now() / 1000, 1) + 3 : 60 * attempt);
+      log(`GitHub asked to slow down — waiting ${Math.round(wait)}s (attempt ${attempt}/8)…`, "warn");
+      await sleep(wait * 1000); continue;
+    }
+    if (res.status >= 500) { await sleep(5000 * attempt); continue; }
+    let j; try { j = JSON.parse(txt); } catch (e) { throw new Error(`GitHub HTTP ${res.status}: ${txt.slice(0, 120)}`); }
+    if (j.errors && !j.data) {
+      const msg = j.errors.map(e => e.message).join("; ");
+      if (/scope|token/i.test(msg)) { const err = new Error(msg); err.fatal = true; throw err; }
+      if (attempt === 8) throw new Error(msg);
+      await sleep(5000 * attempt); continue;
+    }
+    if (!j.data || !j.data.search) throw new Error(`GitHub HTTP ${res.status}: ${txt.slice(0, 120)}`);
+    return j.data.search;
+  }
+  throw new Error("GitHub kept rate-limiting; try again later");
+}
+async function fetchGithubTop(token, target, opt) {
+  // Walk down the follower ranking: each query returns <=1,000 users sorted by followers,
+  // the next one starts at the lowest follower count seen. No count queries needed.
+  opt = opt || {}; const fetchImpl = opt.fetchImpl || fetch, log = opt.log || (() => {}), pause = opt.pause == null ? 1500 : opt.pause;
+  const seen = new Map(); let upper = null, calls = 0;
+  while (seen.size < target) {
+    const q = `type:user followers:${upper == null ? ">=100" : "100.." + upper} sort:followers-desc`;
+    let cursor = null, got = 0, low = null, added = 0, page;
+    do {
+      page = await ghGql(token, q, cursor, fetchImpl, log); calls++;
+      for (const n of page.nodes || []) {
+        if (!n || !n.login) continue;
+        got++; low = n.followers.totalCount;
+        if (!seen.has(n.login.toLowerCase())) { seen.set(n.login.toLowerCase(), n); added++; }
+      }
+      cursor = page.pageInfo.endCursor;
+      if (opt.progress) opt.progress(seen.size, calls);
+      if (pause) await sleep(pause);
+    } while (page.pageInfo.hasNextPage && got < 1000 && seen.size < target);
+    if (!added || low == null || low === upper) break;
+    upper = low;
+  }
+  const users = [...seen.values()].sort((a, b) => b.followers.totalCount - a.followers.totalCount).slice(0, target);
+  return users.map((u, i) => {
+    const [li, src] = liFromGithub(u);
+    const company = oneLine(u.company);
+    return {
+      rank: String(i + 1), login: u.login, name: oneLine(u.name), followers: String(u.followers.totalCount),
+      github_url: u.url || "https://github.com/" + u.login, company, location: oneLine(u.location), bio: oneLine(u.bio),
+      website: u.websiteUrl || "", twitter: u.twitterUsername || "", linkedin_url: li, linkedin_source: src,
+      search_name: oneLine(u.name) || u.login,
+      search_company: company.replace(/^@/, "").split(/[,|/]| and | & /)[0].replace(/^@/, "").trim()
+    };
+  });
+}
+const GH_FIELDS = ["rank", "login", "name", "followers", "github_url", "company", "location", "bio", "website", "twitter", "linkedin_url", "linkedin_source", "search_name", "search_company"];
+const LI_TPL = '"{value}" {extra} site:linkedin.com/in';
 async function fetchSerp(key, q, gl, fetchImpl = fetch) {
   const body = { q, num: N, hl: "en" }; if (gl) body.gl = gl;
   for (let attempt = 1; attempt <= 4; attempt++) {
@@ -297,8 +427,8 @@ async function clearProgress() {
 function logLine(t, cls) { const d = document.createElement("div"); if (cls) d.className = cls; d.textContent = `${new Date().toLocaleTimeString()}  ${t}`; $("log").appendChild(d); $("log").scrollTop = 1e9; }
 function stats() {
   const total = S.rows.length, vals = Object.values(S.results);
-  const done = vals.filter(v => v.serp_status === "OK" || v.serp_status === "ERROR").length;
-  const ok = vals.filter(v => v.serp_status === "OK").length, err = done - ok;
+  const done = vals.filter(v => v.serp_status === "OK" || v.serp_status === "ERROR" || v.serp_status === "SKIPPED").length;
+  const ok = vals.filter(v => v.serp_status === "OK" || v.serp_status === "SKIPPED").length, err = done - ok;
   $("sDone").textContent = done; $("sTotal").textContent = total; $("sOk").textContent = ok; $("sErr").textContent = err;
   $("prog").style.width = total ? (100 * done / total).toFixed(1) + "%" : "0";
   if (S.running && S.t0) {
@@ -335,19 +465,70 @@ function loadFile(file) {
     const p = Papa.parse(body, { header: true, skipEmptyLines: "greedy" });
     S.fields = (p.meta.fields || []).map(f => f.trim()); S.rows = p.data.map(r => { const o = {}; Object.keys(r).forEach(k => o[k.trim()] = r[k]); return o; });
     S.fileKey = hashStr(file.name + "|" + body.length + "|" + body.slice(0, 2000));
+    if (S.fields.includes("login") && S.fields.includes("linkedin_url") && !S.fields.includes("search_name")) {
+      // output of github_influencers_linkedin.py: add the search columns the LinkedIn preset uses
+      S.rows.forEach(r => { r.search_name = oneLine(r.name) || r.login;
+        r.search_company = oneLine(r.company).replace(/^@/, "").split(/[,|/]| and | & /)[0].replace(/^@/, "").trim(); });
+      S.fields.push("search_name", "search_company");
+    }
     S.results = await loadProgress();
     Object.keys(S.results).forEach(k => saveRow(k));
-    const guess = S.fields.find(f => /company|name/i.test(f)) || S.fields[0];
-    const guess2 = S.fields.find(f => /domain|website/i.test(f)) || "";
-    $("col").innerHTML = S.fields.map(f => `<option${f === guess ? " selected" : ""}>${escapeHtml(f)}</option>`).join("");
-    $("col2").innerHTML = `<option value="">(none)</option>` + S.fields.map(f => `<option${f === guess2 ? " selected" : ""}>${escapeHtml(f)}</option>`).join("");
-    $("col").disabled = $("col2").disabled = false;
+    S.outName = file.name.replace(/\.csv$/i, "") + "_google_serp.csv";
+    if (S.fields.includes("search_name") && S.fields.includes("linkedin_url")) { setColumns("search_name", "search_company"); liPreset(); }
+    else setColumns(S.fields.find(f => /company|name/i.test(f)) || S.fields[0], S.fields.find(f => /domain|website/i.test(f)) || "");
     $("fileinfo").textContent = `${file.name}: ${S.rows.length} rows, ${S.fields.length} columns` + (skip ? ` (skipped ${skip} empty leading line${skip > 1 ? "s" : ""})` : "") +
       (Object.keys(S.results).length ? ` — ${Object.keys(S.results).length} rows already done earlier, they will be skipped` : "");
     ["start", "dl", "reset"].forEach(id => $(id).disabled = false);
     stats(); logLine(`Loaded ${file.name} (${S.rows.length} rows).`);
   });
 }
+function setColumns(guess, guess2) {
+  $("col").innerHTML = S.fields.map(f => `<option${f === guess ? " selected" : ""}>${escapeHtml(f)}</option>`).join("");
+  $("col2").innerHTML = `<option value="">(none)</option>` + S.fields.map(f => `<option${f === guess2 ? " selected" : ""}>${escapeHtml(f)}</option>`).join("");
+  $("col").disabled = $("col2").disabled = false;
+}
+function liPreset() {
+  $("tpl").value = LI_TPL; $("limode").checked = true;
+  if (S.fields.includes("search_name")) setColumns("search_name", S.fields.includes("search_company") ? "search_company" : "");
+  if ($("prov").value !== "serper") { $("prov").value = "serper"; provNote(); }
+}
+$("lipreset").addEventListener("click", liPreset);
+
+/* ---------- GitHub list UI ---------- */
+async function idbGet(k) { try { const d = await db(); return await new Promise(res => { const rq = d.transaction("rows").objectStore("rows").get(k); rq.onsuccess = () => res(rq.result); rq.onerror = () => res(null); }); } catch (e) { return null; } }
+async function idbPut(k, v) { try { const d = await db(); await new Promise(res => { const tx = d.transaction("rows", "readwrite"); tx.objectStore("rows").put(v, k); tx.oncomplete = res; tx.onerror = res; }); } catch (e) {} }
+async function useGithubRows(rows, label) {
+  S.fields = GH_FIELDS.slice(); S.rows = rows;
+  S.fileKey = "gh" + hashStr(rows.map(r => r.login).join(","));
+  S.results = await loadProgress();
+  S.outName = `github_top_${rows.length}_linkedin.csv`;
+  setColumns("search_name", "search_company"); liPreset();
+  const has = rows.filter(r => r.linkedin_url).length;
+  $("ghinfo").textContent = `${label}: ${rows.length} users — ${has} already show a LinkedIn on GitHub, ${rows.length - has} to search on Google (≈${rows.length - has} Serper credits).`;
+  $("fileinfo").textContent = `Using the GitHub list (${rows.length} rows).` + (Object.keys(S.results).length ? ` ${Object.keys(S.results).length} rows already done earlier will be skipped.` : "");
+  ["start", "dl", "reset", "ghdl"].forEach(id => $(id).disabled = false);
+  stats(); logLine(`${label}: ${rows.length} users loaded. Paste your Serper key in step 1 and press Start.`, "ok");
+}
+try { $("ghtok").value = localStorage.getItem("gh_token") || ""; } catch (e) {}
+idbGet("__ghlist__").then(v => { if (v && v.rows && v.rows.length) { $("ghsaved").disabled = false; $("ghsaved").textContent = `Use last saved list (${v.rows.length} users, ${new Date(v.at).toLocaleString()})`; } });
+$("ghsaved").addEventListener("click", async () => { const v = await idbGet("__ghlist__"); if (v) useGithubRows(v.rows, "Saved GitHub list"); });
+$("ghdl").addEventListener("click", () => {
+  if (!S.fields.includes("search_name")) return;
+  saveCsv(Papa.unparse({ fields: GH_FIELDS, data: S.rows }), `github_top_${S.rows.length}_users.csv`);
+});
+$("ghgo").addEventListener("click", async () => {
+  const tok = $("ghtok").value.trim(); if (!tok) { alert("Paste a GitHub token first."); return; }
+  try { localStorage.setItem("gh_token", tok); } catch (e) {}
+  const n = Math.max(10, Math.min(5000, parseInt($("ghn").value) || 2000));
+  $("ghgo").disabled = true; logLine(`Fetching the top ${n} GitHub users (about ${Math.ceil(n / 50) + 2} requests, paced ~1.5s apart)…`);
+  try {
+    const rows = await fetchGithubTop(tok, n, { log: logLine, progress: (k, c) => { $("ghinfo").textContent = `Fetched ${k} users (${c} requests)…`; } });
+    await idbPut("__ghlist__", { rows, at: Date.now() });
+    $("ghsaved").disabled = false; $("ghsaved").textContent = `Use last saved list (${rows.length} users, just now)`;
+    await useGithubRows(rows, "GitHub list");
+  } catch (e) { logLine("GitHub fetch failed: " + e.message, "bad"); $("ghinfo").textContent = "Failed: " + e.message; }
+  $("ghgo").disabled = false;
+});
 function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
 $("start").addEventListener("click", start);
@@ -356,14 +537,18 @@ $("dl").addEventListener("click", download);
 $("reset").addEventListener("click", () => { if (!confirm("Clear saved progress for this file?")) return; S.results = {}; clearProgress(); stats(); logLine("Progress cleared."); });
 
 async function start() {
-  const key = $("key").value.trim(); if (!key) { alert("Enter your Serper API key first."); return; }
+  const key = $("key").value.trim(); if (!key) { alert("Enter the API key for the selected provider first."); return; }
   try { if ($("remember").checked) localStorage.setItem(keyName(), key); } catch (e) {}
   const col = $("col").value, col2 = $("col2").value, tpl = $("tpl").value, gl = $("gl").value.trim().toLowerCase();
   const prov = $("prov").value, relay = $("relay").value.trim();
   try { localStorage.setItem("serp_relay", relay); localStorage.setItem("serp_prov", prov); } catch (e) {}
+  const li = $("limode").checked;
   S.queue = []; S.rows.forEach((r, i) => { const x = S.results[i] || {};
-    const done = x.serp_status === "OK" && (x.serp_provider || "serper") === prov;
+    if (li && liFromText(r.linkedin_url)) { if (x.serp_status !== "OK") { S.results[i] = { serp_status: "SKIPPED", serp_error: "", serp_query: "" }; saveRow(i); } return; }
+    if (x.serp_status === "SKIPPED") delete S.results[i];
+    const done = x.serp_status === "OK" && (li || (x.serp_provider || "serper") === prov);
     if (!done && (r[col] || "").trim()) S.queue.push(i); });
+  stats();
   S.netFails = 0;
   if (!S.queue.length) { logLine("Nothing left to do.", "ok"); return; }
   if (prov === "serpapi") {
@@ -376,7 +561,7 @@ async function start() {
       if (left === 0) { logLine("No searches left on this SerpApi plan — upgrade or wait for the monthly reset.", "bad"); return; }
     } catch (e) { logLine("Could not read SerpApi account info (" + e.message + ").", "warn"); }
   }
-  S.running = true; S.t0 = Date.now(); S.doneAtStart = Object.values(S.results).filter(v => v.serp_status === "OK" || v.serp_status === "ERROR").length;
+  S.running = true; S.t0 = Date.now(); S.doneAtStart = Object.values(S.results).filter(v => v.serp_status === "OK" || v.serp_status === "ERROR" || v.serp_status === "SKIPPED").length;
   $("start").disabled = true; $("pause").disabled = false;
   logLine(`Starting ${S.queue.length} searches with ${Math.max(1, Math.min(20, parseInt($("conc").value) || 5))} in parallel…`);
   const conc = Math.max(1, Math.min(20, parseInt($("conc").value) || 5));
@@ -414,15 +599,16 @@ async function worker(key, col, col2, tpl, gl, prov, relay) {
   }
 }
 function download() {
-  const { fields, data } = buildOutput(S.rows, S.fields, S.results);
-  const csv = Papa.unparse({ fields, data });
+  const { fields, data } = buildOutput(S.rows, S.fields, S.results, { li: $("limode").checked, nameCol: $("col").value });
+  saveCsv(Papa.unparse({ fields, data }), S.outName || "input_google_serp.csv");
+}
+function saveCsv(csv, name) {
   const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-  const name = ($("file").files[0] && $("file").files[0].name) || "input.csv";
-  a.download = name.replace(/\.csv$/i, "") + "_google_serp.csv"; document.body.appendChild(a); a.click(); a.remove();
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
-if (typeof window !== "undefined") window.__serpTest = { buildQuery, flatten, outFields, buildOutput, fetchSerp, fetchSerpApi, aioText };
+if (typeof window !== "undefined") window.__serpTest = { buildQuery, flatten, outFields, buildOutput, fetchSerp, fetchSerpApi, aioText, liFromText, liFromGithub, pickLinkedIn, fetchGithubTop, loadFile, getState: () => S };
 </script>
 </body>
 </html>
